@@ -5,18 +5,20 @@ Z.ai 2 API
 基于 https://github.com/kbykb/OpenAI-Compatible-API-Proxy-for-Z 使用 AI 辅助重构。
 """
 
-import json, re, requests, logging
+import json, re, requests, logging, os
 from datetime import datetime
+from functools import wraps
 from flask import Flask, request, Response, jsonify, make_response
 
 # --- 配置 ---
 API_BASE = "https://chat.z.ai"
-PORT = 8080 # 对外端口
+PORT = int(os.getenv("PORT", 8080)) # 对外端口
 UPSTREAM_TOKEN = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMxNmJjYjQ4LWZmMmYtNGExNS04NTNkLWYyYTI5YjY3ZmYwZiIsImVtYWlsIjoiR3Vlc3QtMTc1NTg0ODU4ODc4OEBndWVzdC5jb20ifQ.PktllDySS3trlyuFpTeIZf-7hl8Qu1qYF3BxjgIul0BrNux2nX9hVzIjthLXKMWAf9V0qM8Vm_iyDqkjPGsaiQ"
-MODEL_NAME = "GLM-4.5" # 没传入模型时选用的默认模型
-DEBUG_MODE = True # 显示调试信息
-THINK_TAGS_MODE = "think" # 思考链处理，选项说明详见 https://github.com/hmjz100/Z.ai2api/blob/main/README.md#%E5%8A%9F%E8%83%BD
-ANON_TOKEN_ENABLED = True # 是否启用访客模式（即不调用 UPSTREAM_TOKEN）
+MODEL_NAME = os.getenv("MODEL_NAME", "GLM-4.5") # 没传入模型时选用的默认模型
+DEBUG_MODE = os.getenv("DEBUG_MODE", "True").lower() == "true" # 显示调试信息
+THINK_TAGS_MODE = os.getenv("THINK_TAGS_MODE", "think") # 思考链处理，选项说明详见 https://github.com/hmjz100/Z.ai2api/blob/main/README.md#%E5%8A%9F%E8%83%BD
+ANON_TOKEN_ENABLED = os.getenv("ANON_TOKEN_ENABLED", "True").lower() == "true" # 是否启用访客模式（即不调用 UPSTREAM_TOKEN）
+API_KEY = os.getenv("API_KEY") # 外部调用API时使用的认证密钥
 
 BROWSER_HEADERS = {
 	"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/139.0.0.0",
@@ -40,6 +42,33 @@ def debug(msg, *args):
 app = Flask(__name__)
 
 # --- 工具函数 ---
+def require_auth(f):
+	"""OpenAI标准认证装饰器"""
+	@wraps(f)
+	def decorated_function(*args, **kwargs):
+		# OPTIONS请求用于CORS预检，跳过认证
+		if request.method == 'OPTIONS':
+			return f(*args, **kwargs)
+		
+		# 如果没有配置API_KEY，跳过认证
+		if not API_KEY:
+			return f(*args, **kwargs)
+		
+		auth_header = request.headers.get('Authorization')
+		if not auth_header:
+			return set_cors(jsonify({"error": {"message": "Missing Authorization header", "type": "invalid_request_error"}})), 401
+		
+		# 检查Bearer token格式
+		if not auth_header.startswith('Bearer '):
+			return set_cors(jsonify({"error": {"message": "Invalid Authorization header format. Expected: Bearer <token>", "type": "invalid_request_error"}})), 401
+		
+		token = auth_header[7:]  # 移除 'Bearer ' 前缀
+		if token != API_KEY:
+			return set_cors(jsonify({"error": {"message": "Invalid API key", "type": "invalid_request_error"}})), 401
+		
+		return f(*args, **kwargs)
+	return decorated_function
+
 def set_cors(resp):
 	resp.headers.update({
 		"Access-Control-Allow-Origin": "*",
@@ -179,6 +208,7 @@ def extract_content(data):
 
 # --- 路由 ---
 @app.route("/v1/models", methods=["GET", "OPTIONS"])
+@require_auth
 def models():
 	if request.method=="OPTIONS": return set_cors(make_response())
 	try:
@@ -233,6 +263,7 @@ def models():
 		return set_cors(jsonify({"error":"fetch models failed"})), 500
 
 @app.route("/v1/chat/completions", methods=["POST", "OPTIONS"])
+@require_auth
 def chat():
 	if request.method=="OPTIONS": return set_cors(make_response())
 	req = request.get_json(force=True, silent=True) or {}
@@ -265,6 +296,7 @@ def chat():
 
 # --- 主入口 ---
 if __name__ == "__main__":
-	log.info("代理启动: 端口=%s, 备选模型=%s，思考处理=%s, Debug=%s", PORT, MODEL_NAME, THINK_TAGS_MODE, DEBUG_MODE)
+	auth_status = "启用" if API_KEY else "禁用"
+	log.info("代理启动: 端口=%s, 备选模型=%s，思考处理=%s, Debug=%s, API认证=%s", PORT, MODEL_NAME, THINK_TAGS_MODE, DEBUG_MODE, auth_status)
 	app.run(host="0.0.0.0", port=PORT, threaded=True)
 	# app.run(host="0.0.0.0", port=PORT, threaded=True, debug=True)
